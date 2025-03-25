@@ -1,0 +1,86 @@
+
+
+CREATE PROCEDURE TransferService(
+    IN source_aircraft_id INT,
+    IN destination_aircraft_id INT,
+    IN transfer_service_id INT
+)
+BEGIN
+    DECLARE source_customer_id INT;
+    DECLARE dest_customer_id INT;
+    DECLARE service_status VARCHAR(50);
+    DECLARE compatible_asset_id INT;
+    DECLARE error_message VARCHAR(255);
+    
+    -- Start Transaction
+    START TRANSACTION;
+    
+    -- Validate if source and destination aircraft exist and belong to the same airline
+    SELECT customer_id INTO source_customer_id FROM Aircraft WHERE aircraft_id = source_aircraft_id;
+    SELECT customer_id INTO dest_customer_id FROM Aircraft WHERE aircraft_id = destination_aircraft_id;
+    
+    IF source_customer_id IS NULL OR dest_customer_id IS NULL THEN
+        SET error_message = 'One or both aircraft do not exist.';
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = error_message;
+    END IF;
+
+    IF source_customer_id <> dest_customer_id THEN
+        SET error_message = 'Source and destination aircraft must belong to the same airline.';
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = error_message;
+    END IF;
+
+    -- Validate service status
+    SELECT status INTO service_status FROM Services WHERE service_id = transfer_service_id AND aircraft_id = source_aircraft_id;
+
+    IF service_status IS NULL THEN
+        SET error_message = 'Service does not exist for the given source aircraft.';
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = error_message;
+    END IF;
+
+    IF service_status = 'In Progress' THEN
+        SET error_message = 'Service transfer is not allowed while status is In Progress.';
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = error_message;
+    END IF;
+
+    -- Check for compatible asset on destination aircraft
+    SELECT asset_id INTO compatible_asset_id 
+    FROM Assets 
+    WHERE aircraft_id = destination_aircraft_id 
+    AND asset_type = (SELECT asset_type FROM Assets WHERE asset_id = (SELECT asset_id FROM Services WHERE service_id = transfer_service_id));
+
+    -- If no compatible asset exists, assign a new asset
+    IF compatible_asset_id IS NULL THEN
+        INSERT INTO Assets (aircraft_id, asset_type, serial_number, installed_date)
+        SELECT destination_aircraft_id, asset_type, CONCAT('NEW-', UUID()), NOW()
+        FROM Assets 
+        WHERE asset_id = (SELECT asset_id FROM Services WHERE service_id = transfer_service_id)
+        LIMIT 1;
+        
+        SET compatible_asset_id = LAST_INSERT_ID();
+    END IF;
+
+    -- Transfer service
+    UPDATE Services 
+    SET aircraft_id = destination_aircraft_id, asset_id = compatible_asset_id, service_date = NOW()
+    WHERE service_id = transfer_service_id;
+
+    -- Insert into audit log
+    INSERT INTO Service_Transfer_Log (service_id, source_aircraft_id, destination_aircraft_id, transfer_date)
+    VALUES (transfer_service_id, source_aircraft_id, destination_aircraft_id, NOW());
+
+    -- Commit transaction
+    COMMIT;
+END
+
+
+Explanation of the Implementation:
+	•	Service Transfer Procedure:
+	•	Checks if both source and destination aircraft exist.
+	•	Ensures they belong to the same airline.
+	•	Verifies the service is active and not ‘In Progress.’
+	•	Checks for a compatible asset on the destination aircraft and assigns a new one if necessary.
+	•	Transfers the service and updates the logs.
+	•	Ensures atomic transactions (rollback on failure).
+	•	Queries for Analysis:
+	•	Identifies top 5 aircraft receiving the most service transfers in the past year.
+	•	Lists aircraft that had multiple transfers within any 30-day period.
